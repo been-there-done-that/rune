@@ -34,6 +34,8 @@ use chrome::{frame_chrome, place_chrome, sync_chrome, titlebar_double_click};
 mod configure;
 pub(crate) use configure::configure;
 mod create;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+mod csd;
 mod native;
 use native::Native;
 mod win;
