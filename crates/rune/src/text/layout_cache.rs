@@ -89,6 +89,18 @@ impl TextSystem {
             self.elisions.retain(|_, e| e.used == g || !gone.contains(&e.shape));
             self.superseded.clear();
         }
+        // Text this commit laid out keeps only the widths this commit used. The other widths
+        // (a min- or max-content measure, a width from before a resize) would otherwise stay two
+        // more commits, and an app that goes idle after opening a long document never commits
+        // again: each paragraph held its layout two or three times. A width needed again
+        // re-breaks the kept layout; it is not shaped again.
+        let live: HashMap<u64, u64> = self.layouts.iter().filter(|(_, e)| e.used == g && e.shape != 0).map(|(k, e)| (e.shape, *k)).collect();
+        if !live.is_empty() {
+            self.layouts.retain(|_, e| e.used == g || !live.contains_key(&e.shape));
+            for (shape, key) in live {
+                self.shapes.insert(shape, key);
+            }
+        }
         evict(&mut self.layouts, g);
         let layouts = &self.layouts;
         self.shapes.retain(|_, key| layouts.contains_key(key));

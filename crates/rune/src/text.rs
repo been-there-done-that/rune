@@ -3,7 +3,8 @@
 //!
 //! Invariants: layouts are in device pixels; every layout is cached by a 64-bit hash of
 //! (text, spans, style, scale, width), kept for two commits unused and then while a budget of
-//! stale layouts lasts (`STALE_BYTES`), least recently used out first; a width not cached re-breaks
+//! stale layouts lasts (`STALE_BYTES`), least recently used out first, except that text a commit
+//! laid out keeps only the widths that commit used; a width not cached re-breaks
 //! a cached layout of the same text and style rather than shaping it again; glyph keys include
 //! the run's variation coordinates, so one variable font serves every weight.
 

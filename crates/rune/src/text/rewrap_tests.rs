@@ -214,3 +214,25 @@ fn a_layout_nothing_holds_rebreaks_in_place_at_a_new_width() {
     assert!(!Rc::ptr_eq(&other, &narrower));
     assert_eq!(geometry(&narrower), before);
 }
+
+/// Text laid out at several widths in one commit (a measure, then the width it is drawn at)
+/// keeps only the widths the next commit uses, so an idle app holds each paragraph once. A
+/// dropped width comes back by re-breaking, not shaping.
+#[test]
+fn widths_a_later_commit_did_not_use_are_dropped() {
+    let mut ts = TextSystem::default();
+    let style = TextStyle::new(15.0, 400.0);
+    let text = "a paragraph long enough to wrap over several lines at a narrow width";
+    ts.layout_rich(text, &[], style, 2.0, Some(0.0));
+    ts.layout_rich(text, &[], style, 2.0, None);
+    ts.layout_rich(text, &[], style, 2.0, Some(400.0));
+    ts.end_commit();
+    assert_eq!(ts.cached_layout_count(), 3, "all three were used in that commit");
+    ts.layout_rich(text, &[], style, 2.0, Some(400.0));
+    ts.end_commit();
+    assert_eq!(ts.cached_layout_count(), 1, "only the width in use stays");
+    assert!(ts.shapes.values().all(|k| ts.layouts.contains_key(k)));
+    let shaped = ts.shaped;
+    ts.layout_rich(text, &[], style, 2.0, Some(0.0));
+    assert_eq!(ts.shaped, shaped, "a dropped width re-breaks the kept layout");
+}
