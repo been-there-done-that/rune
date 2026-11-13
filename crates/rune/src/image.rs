@@ -81,9 +81,21 @@ impl Image {
     }
 }
 
+/// The cache id of straight-alpha RGBA pixels, shared by `rgba` and `rgba_owned`.
+fn rgba_id(width: u32, height: u32, bytes: &[u8]) -> ImageId {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"rune-rgba8\0");
+    hash.update(&width.to_le_bytes());
+    hash.update(&height.to_le_bytes());
+    hash.update(bytes);
+    *hash.finalize().as_bytes()
+}
+
 enum Input {
     Encoded(Arc<[u8]>),
     Rgba(u32, u32, Arc<[u8]>),
+    /// `ImageCache::rgba_owned`: the caller's buffer, kept as it is rather than copied into an Arc.
+    RgbaOwned(u32, u32, Vec<u8>),
     Icon(std::path::PathBuf, u32),
     Svg(Arc<[u8]>, u32),
     #[cfg(not(target_arch = "wasm32"))]
@@ -100,6 +112,7 @@ impl Input {
         match self {
             Input::Encoded(bytes) => decode(&bytes),
             Input::Rgba(w, h, bytes) => mip_chain(w, h, &bytes),
+            Input::RgbaOwned(w, h, bytes) => mip_chain(w, h, &bytes),
             Input::Svg(bytes, px) => svg_rgba(&bytes, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes)),
             #[cfg(not(target_arch = "wasm32"))]
             Input::Icon(path, px) => app_icon_rgba(&path, px).and_then(|(w, h, bytes)| mip_chain(w, h, &bytes)),
@@ -233,12 +246,14 @@ impl ImageCache {
     /// Straight-alpha sRGB RGBA8. Validation, premultiplication and mips happen off-thread.
     pub fn rgba(&self, width: u32, height: u32, bytes: impl Into<Arc<[u8]>>) -> Image {
         let bytes = bytes.into();
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"rune-rgba8\0");
-        hash.update(&width.to_le_bytes());
-        hash.update(&height.to_le_bytes());
-        hash.update(&bytes);
-        self.request(*hash.finalize().as_bytes(), Input::Rgba(width, height, bytes))
+        self.request(rgba_id(width, height, &bytes), Input::Rgba(width, height, bytes))
+    }
+
+    /// [`ImageCache::rgba`] for a buffer the caller is done with. Turning a `Vec` into an
+    /// `Arc<[u8]>` copies it, so a freshly decoded picture would briefly exist twice; this keeps
+    /// the `Vec`. The same pixels give the same image either way.
+    pub fn rgba_owned(&self, width: u32, height: u32, bytes: Vec<u8>) -> Image {
+        self.request(rgba_id(width, height, &bytes), Input::RgbaOwned(width, height, bytes))
     }
 
     /// The Finder icon for an app bundle or any file path, rasterized at 2× `size_pt`.
@@ -728,6 +743,17 @@ mod tests {
         assert!(small.is_ready() && !large.is_ready());
         rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
         assert!(large.is_ready());
+    }
+
+    #[test]
+    fn rgba_owned_matches_rgba() {
+        let (tx, rx) = mpsc::channel();
+        let cache = ImageCache::new(Arc::new(move || { tx.send(()).unwrap(); }));
+        let owned = cache.rgba_owned(1, 1, vec![20, 40, 60, 255]);
+        let shared = cache.rgba(1, 1, vec![20, 40, 60, 255]);
+        assert!(Arc::ptr_eq(&owned.0, &shared.0), "same pixels, same cache entry");
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(owned.decoded().unwrap().unwrap().mips[0].pixels, [20, 40, 60, 255]);
     }
 
     #[test]
