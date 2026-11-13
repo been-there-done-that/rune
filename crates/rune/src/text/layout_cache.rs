@@ -47,11 +47,11 @@ pub(super) const STALE_BYTES: usize = 3 << 20;
 /// Drops what `cache` hasn't used in the last two commits once it outgrows [`STALE_BYTES`],
 /// least recently used first. A view's layouts all share the commit it was last shown in, so
 /// that commit's are kept while the budget lasts rather than all dropped together.
-fn evict<T>(cache: &mut Cache<T>, g: u32) {
+fn evict<T>(cache: &mut Cache<T>, g: u32) -> usize {
     let stale = |used: u32| g.wrapping_sub(used) >= 2;
     let total: usize = cache.values().filter(|e| stale(e.used)).map(|e| e.cost as usize).sum();
     if total <= STALE_BYTES {
-        return;
+        return 0;
     }
     let mut ages: Vec<(u32, usize)> = cache.values().filter(|e| stale(e.used)).map(|e| (g.wrapping_sub(e.used), e.cost as usize)).collect();
     ages.sort_unstable_by_key(|a| a.0);
@@ -65,10 +65,28 @@ fn evict<T>(cache: &mut Cache<T>, g: u32) {
         }
     }
     let mut room = STALE_BYTES - younger;
+    let mut dropped = 0;
     cache.retain(|_, e| {
         let (age, cost) = (g.wrapping_sub(e.used), e.cost as usize);
-        age < cutoff || age == cutoff && cost <= room && { room -= cost; true }
+        let keep = age < cutoff || age == cutoff && cost <= room && { room -= cost; true };
+        if !keep { dropped += cost; }
+        keep
     });
+    dropped
+}
+
+/// Estimated layout bytes a commit must drop before the freed heap is handed back to the OS.
+const TRIM_AFTER: usize = 16 << 20;
+
+/// Hands freed heap pages back to the OS. glibc returns only the top of the heap on its own, and
+/// dropped layouts sit between live ones, so without this a long document's dropped layouts stay
+/// resident. A few milliseconds, and only after a large drop.
+fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free memory the allocator owns.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 impl TextSystem {
@@ -94,18 +112,26 @@ impl TextSystem {
         // more commits, and an app that goes idle after opening a long document never commits
         // again: each paragraph held its layout two or three times. A width needed again
         // re-breaks the kept layout; it is not shaped again.
+        let mut dropped = 0;
         let live: HashMap<u64, u64> = self.layouts.iter().filter(|(_, e)| e.used == g && e.shape != 0).map(|(k, e)| (e.shape, *k)).collect();
         if !live.is_empty() {
-            self.layouts.retain(|_, e| e.used == g || !live.contains_key(&e.shape));
+            self.layouts.retain(|_, e| {
+                let keep = e.used == g || !live.contains_key(&e.shape);
+                if !keep { dropped += e.cost as usize; }
+                keep
+            });
             for (shape, key) in live {
                 self.shapes.insert(shape, key);
             }
         }
-        evict(&mut self.layouts, g);
+        dropped += evict(&mut self.layouts, g);
         let layouts = &self.layouts;
         self.shapes.retain(|_, key| layouts.contains_key(key));
-        evict(&mut self.elisions, g);
-        evict(&mut self.runs, g);
+        dropped += evict(&mut self.elisions, g);
+        dropped += evict(&mut self.runs, g);
+        if dropped > TRIM_AFTER {
+            trim_heap();
+        }
         self.generation = g.wrapping_add(1);
     }
 
